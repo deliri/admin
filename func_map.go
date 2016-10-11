@@ -197,6 +197,42 @@ func (context *Context) renderSections(value interface{}, sections []*Section, p
 	}
 }
 
+func (context *Context) renderFilter(filter *Filter) template.HTML {
+	var (
+		err     error
+		content []byte
+		result  = bytes.NewBufferString("")
+	)
+
+	defer func() {
+		if r := recover(); r != nil {
+			debug.PrintStack()
+			result.WriteString(fmt.Sprintf("Get error when render template for filter %v (%v): %v", filter.Name, filter.Type, r))
+		}
+	}()
+
+	if content, err = context.Asset(fmt.Sprintf("metas/filter/%v.tmpl", filter.Type)); err == nil {
+		tmpl := template.New(filter.Type + ".tmpl").Funcs(context.FuncMap())
+		if tmpl, err = tmpl.Parse(string(content)); err == nil {
+			var data = map[string]interface{}{
+				"Filter":          filter,
+				"Label":           filter.Label,
+				"InputNamePrefix": fmt.Sprintf("filters[%v]", filter.Name),
+				"Context":         context,
+				"Resource":        context.Resource,
+			}
+
+			err = tmpl.Execute(result, data)
+		}
+	}
+
+	if err != nil {
+		result.WriteString(fmt.Sprintf("got error when render filter template for %v(%v):%v", filter.Name, filter.Type, err))
+	}
+
+	return template.HTML(result.String())
+}
+
 func (context *Context) renderMeta(meta *Meta, value interface{}, prefix []string, metaType string, writer *bytes.Buffer) {
 	var (
 		err      error
@@ -204,14 +240,14 @@ func (context *Context) renderMeta(meta *Meta, value interface{}, prefix []strin
 	)
 	prefix = append(prefix, meta.Name)
 
-	var generateNestedRenderSections = func(kind string) func(interface{}, []*Section, ...int) template.HTML {
-		return func(value interface{}, sections []*Section, index ...int) template.HTML {
+	var generateNestedRenderSections = func(kind string) func(interface{}, []*Section, int) template.HTML {
+		return func(value interface{}, sections []*Section, index int) template.HTML {
 			var result = bytes.NewBufferString("")
 			var newPrefix = append([]string{}, prefix...)
 
-			if len(index) > 0 {
+			if index >= 0 {
 				last := newPrefix[len(newPrefix)-1]
-				newPrefix = append(newPrefix[:len(newPrefix)-1], fmt.Sprintf("%v[%v]", last, index[0]))
+				newPrefix = append(newPrefix[:len(newPrefix)-1], fmt.Sprintf("%v[%v]", last, index))
 			}
 
 			if len(sections) > 0 {
@@ -228,12 +264,12 @@ func (context *Context) renderMeta(meta *Meta, value interface{}, prefix []strin
 		}
 	}
 
-	funcsMap["render_form"] = generateNestedRenderSections("form")
+	funcsMap["render_nested_form"] = generateNestedRenderSections("form")
 
 	defer func() {
 		if r := recover(); r != nil {
 			debug.PrintStack()
-			writer.Write([]byte(fmt.Sprintf("Get error when render template for meta %v: %v", meta.Name, r)))
+			writer.WriteString(fmt.Sprintf("Get error when render template for meta %v (%v): %v", meta.Name, meta.Type, r))
 		}
 	}()
 
@@ -262,8 +298,11 @@ func (context *Context) renderMeta(meta *Meta, value interface{}, prefix []strin
 			"ResourceValue": value,
 			"Value":         context.FormattedValueOf(value, meta),
 			"Label":         meta.Label,
-			"InputId":       fmt.Sprintf("%v_%v_%v", scope.GetModelStruct().ModelType.Name(), scope.PrimaryKeyValue(), meta.Name),
 			"InputName":     strings.Join(prefix, "."),
+		}
+
+		if !scope.PrimaryKeyZero() {
+			data["InputId"] = fmt.Sprintf("%v_%v_%v", scope.GetModelStruct().ModelType.Name(), scope.PrimaryKeyValue(), meta.Name)
 		}
 
 		data["CollectionValue"] = func() [][]string {
@@ -783,9 +822,23 @@ func (context *Context) AllowedActions(actions []*Action, mode string, records .
 	var allowedActions []*Action
 	for _, action := range actions {
 		for _, m := range action.Modes {
-			if m == mode && action.HasPermission(roles.Update, context, records...) {
-				allowedActions = append(allowedActions, action)
-				break
+			if m == mode {
+				var permission = roles.Update
+				switch strings.ToUpper(action.Method) {
+				case "POST":
+					permission = roles.Create
+				case "DELETE":
+					permission = roles.Delete
+				case "PUT":
+					permission = roles.Update
+				case "GET":
+					permission = roles.Read
+				}
+
+				if action.HasPermission(permission, context, records...) {
+					allowedActions = append(allowedActions, action)
+					break
+				}
 			}
 		}
 	}
@@ -802,7 +855,9 @@ func (context *Context) pageTitle() template.HTML {
 	}
 
 	if context.Action == "action" {
-		return context.t(fmt.Sprintf("%v.actions.%v", context.Resource.ToParam(), context.Result.(*Action).Label), context.Result.(*Action).Label)
+		if action, ok := context.Result.(*Action); ok {
+			return context.t(fmt.Sprintf("%v.actions.%v", context.Resource.ToParam(), action.Label), action.Label)
+		}
 	}
 
 	var (
@@ -856,11 +911,22 @@ func (context *Context) FuncMap() template.FuncMap {
 		"raw":        func(str string) template.HTML { return template.HTML(htmlSanitizer.Sanitize(str)) },
 		"equal":      equal,
 		"stringify":  utils.Stringify,
-		"plural":     inflection.Plural,
-		"singular":   inflection.Singular,
+		"plural": func(value interface{}) string {
+			return inflection.Plural(fmt.Sprint(value))
+		},
+		"singular": func(value interface{}) string {
+			return inflection.Singular(fmt.Sprint(value))
+		},
 		"marshal": func(v interface{}) template.JS {
-			byt, _ := json.Marshal(v)
-			return template.JS(byt)
+			switch value := v.(type) {
+			case string:
+				return template.JS(value)
+			case template.HTML:
+				return template.JS(value)
+			default:
+				byt, _ := json.Marshal(v)
+				return template.JS(byt)
+			}
 		},
 
 		"render":      context.Render,
@@ -880,7 +946,8 @@ func (context *Context) FuncMap() template.FuncMap {
 			context.renderMeta(meta, value, []string{}, typ, result)
 			return template.HTML(result.String())
 		},
-		"page_title": context.pageTitle,
+		"render_filter": context.renderFilter,
+		"page_title":    context.pageTitle,
 		"meta_label": func(meta *Meta) template.HTML {
 			key := fmt.Sprintf("%v.attributes.%v", meta.baseResource.ToParam(), meta.Label)
 			return context.Admin.T(context.Context, key, meta.Label)

@@ -29,15 +29,17 @@
 
     init: function () {
       var $this = this.$element;
+      var remoteUrl = $this.data('remote-data-url');
       var option = {
         minimumResultsForSearch: 20,
         dropdownParent: $this.parent()
       };
 
-      if ($this.data("remote-data-url")) {
+      if (remoteUrl) {
         option.ajax = {
-          url: $this.data("remote-data-url"),
+          url: remoteUrl,
           dataType: 'json',
+          cache: true,
           delay: 250,
           data: function (params) {
             return {
@@ -68,16 +70,22 @@
         };
 
         option.templateResult =  function(data) {
-          var tmpl = $this.parents(".qor-field").find("[name='select2-result-template']");
+          var tmpl = $this.parents('.qor-field').find('[name="select2-result-template"]');
           return QorChooser.formatResult(data, tmpl);
         };
 
         option.templateSelection = function(data) {
           if (data.loading) return data.text;
-          var tmpl = $this.parents(".qor-field").find("[name='select2-selection-template']");
+          var tmpl = $this.parents('.qor-field').find('[name="select2-selection-template"]');
           return QorChooser.formatResult(data, tmpl);
         };
       }
+
+      $this.on('select2:select', function (evt) {
+        $(evt.target).attr('chooser-selected','true');
+      }).on('select2:unselect', function (evt) {
+        $(evt.target).attr('chooser-selected','');
+      });
 
       $this.select2(option);
     },
@@ -96,9 +104,6 @@
       var fn;
 
       if (!data) {
-        if (!$.fn.chosen) {
-          return;
-        }
 
         if (/destroy/.test(options)) {
           return;
@@ -116,9 +121,9 @@
   QorChooser.formatResult = function (data, tmpl) {
     var result = "";
     if (tmpl.length > 0) {
-      result = Mustache.render(tmpl.html().replace(/{{(.*?)}}/g, "[[$1]]"), data);
+      result = Mustache.render(tmpl.html().replace(/{{(.*?)}}/g, '[[$1]]'), data);
     } else {
-      result = data.text || data.Name || data.Title || data.Code;
+      result = data.text || data.Name || data.Title || data.Code || data[Object.keys(data)[0]];
     }
 
     // if is HTML
